@@ -1,0 +1,9 @@
+akshare>=1.12.0
+pandas
+numpy
+tqdm
+openpyxl
+snownlp
+requests
+scipy
+lxml
