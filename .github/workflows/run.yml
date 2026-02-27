@@ -38,7 +38,7 @@ jobs:
 
     # 4. 运行脚本
     - name: Run Script
-      run: python main1.py
+      run: python main.py
 
     # 5. 上传结果
     - name: Upload Excel Report
