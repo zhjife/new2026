@@ -1,4 +1,4 @@
-name: A-Share Daily Scan
+name: A股量化选股
 
 on:
   schedule:
