@@ -145,7 +145,7 @@ def get_stock_hist_data(symbol, code):
             "begin": ts,
             "period": "day",
             "type": "before",
-            "count": -250,
+            "count": -120,
             "indicator": "kline"
         }
         res_data = requests.get(url, params=params, headers=headers, timeout=10)
@@ -265,7 +265,7 @@ def process_single_stock(args):
     
     for attempt in range(max_retries):
         try:
-            time.sleep(random.uniform(0.1, 0.4)) 
+            time.sleep(random.uniform(0.05, 0.2)) 
             df = get_stock_hist_data(symbol, code)
             if df is not None and not df.empty and len(df) >= 30:
                 break
@@ -401,7 +401,11 @@ def main():
         return
 
     print("\n>>> [Step 2] 准备股票列表...", flush=True)
-    valid_stocks = spot_df[spot_df['成交额'] >= 50000000]
+    # 【提速优化1】在第一步就进行严格的快照筛选，大幅砍掉要请求K线的股票数量！
+    valid_stocks = spot_df[spot_df['成交额'] >= 50000000] # 成交额大于5000万
+    valid_stocks = valid_stocks[valid_stocks['换手率'] >= 1.0] # 剔除换手率极低的死水股
+    valid_stocks = valid_stocks[valid_stocks['最新价'] >= 2.0] # 剔除低于2元的垃圾股
+    valid_stocks = valid_stocks[valid_stocks['量比'] >= 0.8] # 可选：只要量比及格的股票
     tasks = list()
     for _, row in valid_stocks.iterrows():
         c = str(row['代码'])
@@ -413,7 +417,7 @@ def main():
     results = list()
     start_t = time.time()
     
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=12) as executor:
         futures = {executor.submit(process_single_stock, t): t for t in tasks}
         done_count = 0
         for future in as_completed(futures):
