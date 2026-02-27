@@ -1,6 +1,19 @@
 import requests
 from curl_cffi import requests as cffi_requests
 
+# 【魔法代码】将 Python 标准库的底层悄悄替换为带有真实 Chrome 浏览器指纹的请求
+requests.get = lambda url, **kwargs: cffi_requests.get(url, impersonate="chrome120", verify=False, **kwargs)
+requests.post = lambda url, **kwargs: cffi_requests.post(url, impersonate="chrome120", verify=False, **kwargs)
+
+import os
+import threading
+
+# 【核心修复】强制 Python 忽略电脑上的一切 VPN 和代理设置，使用本地纯净网络直连！
+os.environ["http_proxy"] = ""
+os.environ["https_proxy"] = ""
+os.environ["HTTP_PROXY"] = ""
+os.environ["HTTPS_PROXY"] = ""
+
 import akshare as ak
 import pandas as pd
 import numpy as np
@@ -8,8 +21,8 @@ import datetime
 import time
 import xlsxwriter
 import random
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from playwright.sync_api import sync_playwright
 
 # ==========================================
 # 模块〇：数据源切换（雪球为主，东方财富为辅）
@@ -18,7 +31,7 @@ token_lock = threading.Lock()
 XUEQIU_TOKEN = ""
 
 def get_xueqiu_token():
-    """获取雪球接口调用必须的授权 Cookie (带线程锁防止并发轰炸)"""
+    """使用 Playwright 无头浏览器获取雪球接口调用必须的授权 Cookie，强力防封IP"""
     global XUEQIU_TOKEN
     if XUEQIU_TOKEN:
         return XUEQIU_TOKEN
@@ -26,10 +39,28 @@ def get_xueqiu_token():
         if XUEQIU_TOKEN:
             return XUEQIU_TOKEN
         try:
-            res = requests.get("https://xueqiu.com/", timeout=10)
-            XUEQIU_TOKEN = res.cookies.get("xq_a_token", "")
-        except:
-            pass
+            print(">>> 正在启动 Playwright 模拟真实浏览器获取 Token...")
+            with sync_playwright() as p:
+                # 启动无头浏览器，注入真实 User-Agent
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                # 访问雪球主页并等待网络空闲，确保防御检测通过
+                page.goto("https://xueqiu.com/", wait_until="networkidle", timeout=30000)
+                
+                # 提取 Cookie
+                cookies = context.cookies()
+                for c in cookies:
+                    if c['name'] == 'xq_a_token':
+                        XUEQIU_TOKEN = c['value']
+                        print(f">>> 成功突破拦截，获取到 Token: {XUEQIU_TOKEN[:15]}...")
+                        break
+                browser.close()
+        except Exception as e:
+            print(f">>> [警告] Playwright 获取 Token 失败: {e}")
+            
     return XUEQIU_TOKEN
 
 def get_market_spot_data():
@@ -295,7 +326,6 @@ def process_single_stock(args):
         # 计算指标
         df = calculate_indicators(df)
         
-        # ... （保持你原有的模型打分和结果组装代码不变）...
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
@@ -346,7 +376,6 @@ def process_single_stock(args):
         }
         
         # 提取最近3天指标 (Day-3, Day-2, Day-1) -> 对应 前天, 昨天, 今天
-        # 注意: iloc[-1] 是今天
         days_map =[('今天', -1), ('昨天', -2), ('前天', -3)]
         
         for label, idx in days_map:
@@ -380,13 +409,9 @@ def generate_report(market_summary, stock_data, filename):
     fmt_good = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100', 'border': 1, 'align': 'center'}) 
     fmt_up = workbook.add_format({'font_color': 'red', 'align': 'center', 'border': 1})
     fmt_down = workbook.add_format({'font_color': 'green', 'align': 'center', 'border': 1})
-    fmt_cmf = workbook.add_format({'num_format': '0.000', 'align': 'center', 'border': 1})
     fmt_obv = workbook.add_format({'num_format': '#,##0', 'align': 'center', 'border': 1})
-    fmt_vol_ratio = workbook.add_format({'num_format': '0.00', 'align': 'center', 'border': 1})
 
-    # ==========================
     # Sheet 1: 市场环境
-    # ==========================
     ws_m = workbook.add_worksheet("市场环境")
     ws_m.merge_range('A1:B1', f"市场环境评分看板 ({datetime.datetime.now().strftime('%Y-%m-%d')})", fmt_title)
     
@@ -401,34 +426,27 @@ def generate_report(market_summary, stock_data, filename):
     ws_m.set_column('A:A', 20)
     ws_m.set_column('B:B', 50)
 
-    # ==========================
     # Sheet 2: 选股结果池
-    # ==========================
     if stock_data:
         df = pd.DataFrame(stock_data)
         
-        # --- 关键步骤：重排下列顺序，将同类指标放在一起 ---
-        # 定义期望的列顺序
         base_cols =['代码', '名称', '现价', '涨幅%', '量比', '总分', '决策', '趋势分(A)', '回踩分(B)', '吸筹分(C)', '市场分']
-        cmf_cols = ['CMF_前天', 'CMF_昨天', 'CMF_今天']
+        cmf_cols =['CMF_前天', 'CMF_昨天', 'CMF_今天']
         obv_cols =['OBV_前天', 'OBV_昨天', 'OBV_今天']
         
-        # 确保所有列都存在 (防止数据不足导致的KeyError)
         final_cols = base_cols + cmf_cols + obv_cols
-        # 仅保留存在的列
-        final_cols = [c for c in final_cols if c in df.columns]
+        final_cols =[c for c in final_cols if c in df.columns]
         
-        df = df[final_cols] # 重排DataFrame
+        df = df[final_cols] 
         df = df.sort_values(by="总分", ascending=False)
         
         df.to_excel(writer, sheet_name='选股池', index=False, startrow=0)
         ws_s = writer.sheets['选股池']
         
-        # --- 表头批注 (Comments) ---
         comments = {
             "总分": "公式 = 市场分(20) + A(30) + B(30) + C(20)\n分数越高确定性越强。",
             "决策": "≥80: 极高确定性\n70-79: 高胜率\n60-69: 观察\n<60: 放弃",
- 	    "趋势分(A)": "满分30分。关注趋势多头与倍量突破。",
+            "趋势分(A)": "满分30分。关注趋势多头与倍量突破。",
             "回踩分(B)": "满分30分。关注缩量回踩均线不破。",
             "吸筹分(C)": "满分20分。关注箱体振幅<15%及量能萎缩。",
             "量比": "衡量相对成交量。\n>1: 放量\n>2: 明显活跃\n<0.7: 缩量\n结合价格看：低位放量为佳。",
@@ -436,21 +454,15 @@ def generate_report(market_summary, stock_data, filename):
             "OBV_今天": "能量潮 (成交量趋势)。\n绝对值无意义，重点看趋势。\n买点：股价横盘震荡，而OBV曲线一路向上（底背离吸筹）。"
         }
         
-        # 写入格式和批注
         for i, col in enumerate(final_cols):
             ws_s.write(0, i, col, fmt_header)
-            
-            # 添加批注
             cmt_text = None
             if col in comments: cmt_text = comments[col]
-            # 为组指标添加统一批注
             elif "CMF" in col: cmt_text = comments.get("CMF_今天")
             elif "OBV" in col: cmt_text = comments.get("OBV_今天")
-            
             if cmt_text:
                 ws_s.write_comment(0, i, cmt_text, {'x_scale': 2.5, 'y_scale': 1.5})
             
-            # 列宽设置
             width = 10
             if "名称" in col: width = 12
             if "决策" in col: width = 15
@@ -458,20 +470,16 @@ def generate_report(market_summary, stock_data, filename):
             if "CMF" in col: width = 11
             ws_s.set_column(i, i, width)
 
-        # 数据行格式化
         for r in range(len(df)):
             x_row = r + 1
-            # 决策高亮
             dec = df.iloc[r]['决策']
             d_fmt = fmt_good if ("极高" in dec or "高胜率" in dec) else fmt_center
             ws_s.write(x_row, final_cols.index('决策'), dec, d_fmt)
             
-            # 涨幅颜色
             pct = df.iloc[r]['涨幅%']
             p_fmt = fmt_up if pct > 0 else (fmt_down if pct < 0 else fmt_center)
             ws_s.write(x_row, final_cols.index('涨幅%'), pct, p_fmt)
             
-            # 量比高亮 (大于2显示红色)
             vr = df.iloc[r].get('量比', 0)
             vr = 0 if pd.isna(vr) else vr
             v_fmt = workbook.add_format({'num_format': '0.00', 'align': 'center', 'border': 1})
@@ -479,12 +487,10 @@ def generate_report(market_summary, stock_data, filename):
             elif vr <= 0.7: v_fmt.set_font_color('blue')
             ws_s.write(x_row, final_cols.index('量比'), vr, v_fmt)
 
-            # CMF / OBV 数字格式
             for col in final_cols:
                 col_idx = final_cols.index(col)
                 if "CMF" in col:
                     val = df.iloc[r][col]
-                    # CMF 大于 0.1 标红
                     c_fmt = workbook.add_format({'num_format': '0.000', 'align': 'center', 'border': 1})
                     if val > 0.1: c_fmt.set_font_color('red')
                     ws_s.write(x_row, col_idx, val, c_fmt)
@@ -502,7 +508,7 @@ def generate_report(market_summary, stock_data, filename):
 
 def main():
     print("==========================================")
-    print("   A股全市场量化扫描 (Ultimate Version)   ")
+    print("   A股全市场量化扫描 (GitHub Actions版)   ")
     print("==========================================")
     
     # 提前初始化好雪球Token，防阻塞
@@ -517,26 +523,16 @@ def main():
 
     # 2. 准备任务列表
     print("\n>>>[Step 2] 准备股票列表...")
-     # 剔除ST、停牌、以及成交额太小的股票
     valid_stocks = spot_df[spot_df['成交额'] > 0]
     valid_stocks = valid_stocks[~valid_stocks['名称'].str.contains("ST")]
-    
-    # 建议增加的初步过滤（利用第一步已经拿到的免费本地数据）：
-    # 1. 剔除当日跌幅过大的 (比如跌幅 > 5% 的不看)
-    # valid_stocks = valid_stocks[valid_stocks['涨跌幅'] >= -5.0]
-    # 2. 剔除成交额小于 5000 万的死水股
     valid_stocks = valid_stocks[valid_stocks['成交额'] >= 50000000]
-    # 3. 如果你的量比策略喜欢活跃股，可以直接要求当日量比 > 1.2
-    # valid_stocks = valid_stocks[valid_stocks['量比'] >= 1.2]
     
-    # 构造任务 (传入: 代码, 名称, 市场分, 量比)
-    tasks = []
+    tasks =[]
     for _, row in valid_stocks.iterrows():
         c = str(row['代码'])
         name = row['名称']
-        vol_ratio = row.get('量比', 0) # 获取量比，如果没有则为0
+        vol_ratio = row.get('量比', 0) 
         
-        # 补全前缀
         if c.startswith('6'): full = f"sh{c}"
         elif c.startswith(('0','3')): full = f"sz{c}"
         else: full = f"bj{c}"
@@ -547,7 +543,9 @@ def main():
 
     # 3. 多线程扫描
     print("\n>>> [Step 3] 启动多线程扫描 (预计 3-5 分钟)...")
-    results =[]
+    
+    # 【修复截断Bug】：换一种写法初始化列表
+    results = list()
     start_t = time.time()
     
     with ThreadPoolExecutor(max_workers=8) as executor:
