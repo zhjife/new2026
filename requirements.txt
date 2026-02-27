@@ -9,4 +9,5 @@ scipy
 lxml
 curl_cffi
 xlsxwriter
+xlsxwriter
 playwright
